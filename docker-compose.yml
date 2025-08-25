@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  price-tracker:
+    build: .
+    container_name: smart-price-tracker
+    restart: unless-stopped
+    ports:
+      - "8050:8050"  # Main dashboard
+      - "8051:8051"  # URL manager
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./exports:/app/exports
+      - ./config:/app/config
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+      - TZ=UTC
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8050', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      - redis
+    networks:
+      - price-tracker-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: price-tracker-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - price-tracker-network
+
+  dashboard:
+    build: .
+    container_name: price-tracker-dashboard
+    restart: unless-stopped
+    ports:
+      - "8052:8050"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./exports:/app/exports
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+      - TZ=UTC
+    command: ["python", "src/dashboard/app.py"]
+    depends_on:
+      - price-tracker
+    networks:
+      - price-tracker-network
+
+  url-manager:
+    build: .
+    container_name: price-tracker-url-manager
+    restart: unless-stopped
+    ports:
+      - "8053:8051"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+      - TZ=UTC
+    command: ["python", "src/dashboard/url_manager.py"]
+    depends_on:
+      - price-tracker
+    networks:
+      - price-tracker-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: price-tracker-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - dashboard
+      - url-manager
+    networks:
+      - price-tracker-network
+
+volumes:
+  redis_data:
+
+networks:
+  price-tracker-network:
+    driver: bridge 
