@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from .database import db_manager
 from ..models.product import Product, PriceHistory, Alert
 from ..scrapers.amazon_scraper import AmazonScraper
+from ..storage.data_manager import DataManager
 from ..utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ class PriceTracker:
     def __init__(self, config: Config = None):
         self.config = config or Config()
         self.scrapers = {}
+        self.data_manager = DataManager(config)
         self._initialize_scrapers()
     
     def _initialize_scrapers(self):
@@ -196,7 +198,7 @@ class PriceTracker:
             
             return True
     
-    def run_tracking(self, product_ids: List[int] = None) -> Dict[str, Any]:
+    def run_tracking(self, product_ids: List[int] = None, export_after: bool = False) -> Dict[str, Any]:
         """Run tracking for specified products or all active products"""
         
         with db_manager.get_session() as session:
@@ -230,38 +232,26 @@ class PriceTracker:
                 'updated': updated_count,
                 'failed': failed_count,
                 'total': len(products),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.utcnow().isoformat(),
+                'export_results': None
             }
+            
+            # Run export if requested
+            if export_after and updated_count > 0:
+                logger.info("Running export after tracking update...")
+                export_results = self.data_manager.run_daily_export()
+                result['export_results'] = export_results
             
             logger.info(f"Tracking run completed: {updated_count} updated, {failed_count} failed")
             return result
     
     def get_product_history(self, product_id: int, days: int = 30) -> List[Dict]:
         """Get price history for a product"""
-        
-        with db_manager.get_session() as session:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
-            
-            history = session.query(PriceHistory).filter(
-                and_(
-                    PriceHistory.product_id == product_id,
-                    PriceHistory.timestamp >= cutoff_date
-                )
-            ).order_by(PriceHistory.timestamp.asc()).all()
-            
-            return [h.to_dict() for h in history]
+        return self.data_manager.get_product_price_trend(product_id, days)
     
     def get_tracked_products(self, active_only: bool = True) -> List[Dict]:
         """Get list of all tracked products"""
-        
-        with db_manager.get_session() as session:
-            query = session.query(Product)
-            
-            if active_only:
-                query = query.filter(Product.is_active == True)
-            
-            products = query.order_by(Product.created_at.desc()).all()
-            return [p.to_dict() for p in products]
+        return self.data_manager.get_all_products_data(active_only)
     
     def remove_product(self, product_id: int) -> bool:
         """Remove a product from tracking (soft delete)"""
@@ -277,4 +267,46 @@ class PriceTracker:
             session.commit()
             
             logger.info(f"Removed product from tracking: {product.title}")
-            return True 
+            return True
+    
+    def export_data(self, export_type: str = "excel", **kwargs) -> Dict[str, Any]:
+        """Export tracking data"""
+        
+        result = {
+            'success': False,
+            'export_type': export_type,
+            'filepath': None,
+            'message': None
+        }
+        
+        try:
+            if export_type.lower() == "excel":
+                filepath = self.data_manager.export_to_excel(**kwargs)
+                if filepath:
+                    result['success'] = True
+                    result['filepath'] = filepath
+                    result['message'] = f"Data exported to {filepath}"
+                else:
+                    result['message'] = "Failed to export to Excel"
+            
+            elif export_type.lower() == "google_sheets":
+                success = self.data_manager.export_to_google_sheets(**kwargs)
+                result['success'] = success
+                result['message'] = "Data exported to Google Sheets" if success else "Failed to export to Google Sheets"
+            
+            else:
+                result['message'] = f"Unsupported export type: {export_type}"
+            
+        except Exception as e:
+            result['message'] = f"Export error: {str(e)}"
+            logger.error(f"Export error: {e}")
+        
+        return result
+    
+    def get_analytics(self, days: int = 30) -> Dict[str, Any]:
+        """Get price analytics for the specified period"""
+        return self.data_manager.get_price_analytics(days)
+    
+    def get_export_status(self) -> Dict[str, Any]:
+        """Get export capabilities status"""
+        return self.data_manager.get_export_status() 
