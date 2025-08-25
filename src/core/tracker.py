@@ -10,6 +10,7 @@ from .database import db_manager
 from ..models.product import Product, PriceHistory, Alert
 from ..scrapers.amazon_scraper import AmazonScraper
 from ..storage.data_manager import DataManager
+from ..notifications.notification_manager import NotificationManager
 from ..utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class PriceTracker:
         self.config = config or Config()
         self.scrapers = {}
         self.data_manager = DataManager(config)
+        self.notification_manager = NotificationManager(config)
         self._initialize_scrapers()
     
     def _initialize_scrapers(self):
@@ -143,16 +145,19 @@ class PriceTracker:
             
             logger.info(f"Updating product: {product.title}")
             
+            # Store previous data for comparison
+            previous_data = {
+                'current_price': product.current_price,
+                'availability': product.availability,
+                'rating': product.rating,
+                'review_count': product.review_count
+            }
+            
             # Scrape current data
             current_data = scraper.extract_product_info(product.url)
             if not current_data:
                 logger.error(f"Failed to scrape updated data for product {product_id}")
                 return False
-            
-            # Store previous values for comparison
-            prev_price = product.current_price
-            prev_availability = product.availability
-            prev_rating = product.rating
             
             # Update product record
             product.title = current_data.get('title') or product.title
@@ -180,21 +185,28 @@ class PriceTracker:
             
             session.commit()
             
-            # Check for significant changes
-            changes = []
-            if prev_price and product.current_price and prev_price != product.current_price:
-                price_change = ((product.current_price - prev_price) / prev_price) * 100
-                changes.append(f"Price: ${prev_price} → ${product.current_price} ({price_change:+.1f}%)")
+            # Check for alerts and send notifications
+            alerts_sent = self.notification_manager.check_and_send_alerts(
+                product_id, previous_data, current_data
+            )
             
-            if prev_availability != product.availability:
+            # Log significant changes
+            changes = []
+            if previous_data['current_price'] and product.current_price and previous_data['current_price'] != product.current_price:
+                price_change = ((product.current_price - previous_data['current_price']) / previous_data['current_price']) * 100
+                changes.append(f"Price: ${previous_data['current_price']} → ${product.current_price} ({price_change:+.1f}%)")
+            
+            if previous_data['availability'] != product.availability:
                 status = "In Stock" if product.availability else "Out of Stock"
                 changes.append(f"Availability: {status}")
             
-            if prev_rating and product.rating and abs(prev_rating - product.rating) > 0.1:
-                changes.append(f"Rating: {prev_rating} → {product.rating}")
+            if previous_data['rating'] and product.rating and abs(previous_data['rating'] - product.rating) > 0.1:
+                changes.append(f"Rating: {previous_data['rating']} → {product.rating}")
             
             if changes:
                 logger.info(f"Changes detected for {product.title}: {'; '.join(changes)}")
+                if alerts_sent:
+                    logger.info(f"Sent {len(alerts_sent)} alerts for product {product_id}")
             
             return True
     
@@ -217,6 +229,7 @@ class PriceTracker:
             
             updated_count = 0
             failed_count = 0
+            total_alerts = 0
             
             for product in products:
                 try:
@@ -309,4 +322,17 @@ class PriceTracker:
     
     def get_export_status(self) -> Dict[str, Any]:
         """Get export capabilities status"""
-        return self.data_manager.get_export_status() 
+        return self.data_manager.get_export_status()
+    
+    def get_notification_status(self) -> Dict[str, Any]:
+        """Get notification services status"""
+        return self.notification_manager.get_notification_status()
+    
+    def test_notifications(self) -> Dict[str, bool]:
+        """Test all notification services"""
+        return self.notification_manager.test_all_notifications()
+    
+    def send_daily_summary(self) -> Dict[str, bool]:
+        """Send daily summary notification"""
+        analytics = self.get_analytics(days=1)  # Last 24 hours
+        return self.notification_manager.send_daily_summary(analytics) 
